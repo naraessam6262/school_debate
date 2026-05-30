@@ -282,9 +282,10 @@ function listenRoom() {
     document.getElementById('d-waitinfo').textContent =
       room.status === 'waiting' ? `${count}명 입장 · 선생님이 시작 버튼을 누르면 시작돼요` : '';
 
-    // 선생님이 Firebase에 forceStart 신호를 보내면 방장이 토론 시작
-    if (room.status === 'waiting' && room.forceStart && isHost) {
-      startDebateFirebase(players);
+    // 선생님이 forceStart 신호를 보내면 → 가장 먼저 입장한 학생이 시작 트리거
+    if (room.status === 'waiting' && room.forceStart && players.length > 0) {
+      const firstUid = players[0].uid; // players는 이미 joinedAt 순 정렬됨
+      if (firstUid === myUid) startDebateFirebase(players);
     }
     if (room.status === 'debating') updateDebateUI(room, players);
     if (room.status === 'done') showResultScreen(room);
