@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎤 토론 교실</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;900&family=Gmarket+Sans:wght@300;500;700&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, push, onValue, onChildAdded, serverTimestamp, update, remove }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDUrRoTYMrJ9iASQdxBWKX4vedm7GKjhoI",
+  authDomain: "skyf6narae.firebaseapp.com",
+  databaseURL: "https://skyf6narae-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "skyf6narae",
+  storageBucket: "skyf6narae.firebasestorage.app",
+  messagingSenderId: "780933934424",
+  appId: "1:780933934424:web:496ef652d21b399eaa892d"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ═══════════════════════════════════════
+// 상수
+// ═══════════════════════════════════════
+const GEMINI_API_KEY = "AIzaSyDUrRoTYMrJ9iASQdxBWKX4vedm7GKjhoI"; // 선생님용 — 학생 화면엔 숨김
+// ※ Gemini API 키는 별도 입력 필요 (아래 GEMINI_KEY 변수에 설정)
+// → 선생님 설정 화면에서 입력받음
+
+const PLAYER_COLORS = ['#5b8ff9','#f97b5b','#5bf9b8','#f9d45b'];
+const GROUP_COLORS  = ['#5b8ff9','#f97b5b','#5bf9b8','#f9d45b'];
+const HOST_COLOR    = '#c084fc';
+const MAX_PLAYERS   = 4;
+
+const PRESET_TOPICS = [
+  '스마트폰을 초등학생이 가져야 할까요?',
+  '학교 급식에서 편식을 허용해야 할까요?',
+  '숙제는 꼭 필요한가요?',
+  '반려동물을 학교에 데려올 수 있어야 할까요?',
+  '게임을 하루 1시간만 해야 할까요?',
+  '교복을 입어야 할까요?',
+  '초등학생도 유튜브 채널을 운영할 수 있어야 할까요?',
+  '인공지능 로봇이 선생님을 대신할 수 있을까요?',
+  '환경 보호를 위해 고기를 먹지 말아야 할까요?',
+  '무인도에 간다면 무엇을 가져가야 할까요?',
+  '우주여행이 일반화되면 달에 이사가도 될까요?',
+  '학교에서 스마트워치 착용을 허용해야 할까요?',
+];
+
+// ═══════════════════════════════════════
+// 전역 상태
+// ═══════════════════════════════════════
+let geminiKey  = '';
+let myGroupIdx = -1;   // 0~3
+let myName     = '';
+let myColor    = '';
+let myUid      = '';
+let globalTopic   = '';
+let totalRounds   = 2;
+let isHost        = false;  // 사회자(AI) 트리거 역할 — 방장(첫 입장자)
+let unsubMessages = null;
+let unsubRoom     = null;
+let lastMsgCount  = 0;
+let isAiSpeaking  = false;
+
+// ═══════════════════════════════════════
+// 화면 전환
+// ═══════════════════════════════════════
+function showScreen(id) {
+  ['screen-home','screen-teacher','screen-group','screen-join','screen-debate','screen-result']
+    .forEach(s => document.getElementById(s).style.display = 'none');
+  document.getElementById(id).style.display = 'flex';
+}
+
+// ═══════════════════════════════════════
+// HOME 화면
+// ═══════════════════════════════════════
+window.goTeacher = () => showScreen('screen-teacher');
+window.goStudent = () => showScreen('screen-group');
+
+// ═══════════════════════════════════════
+// TEACHER 설정 화면
+// ═══════════════════════════════════════
+window.openPreset = () => {
+  const list = document.getElementById('presetList');
+  list.innerHTML = PRESET_TOPICS.map(t =>
+    `<div class="preset-item" onclick="chooseTopic('${t.replace(/'/g,"\\'")}')">${t}</div>`
+  ).join('');
+  document.getElementById('presetModal').classList.add('open');
+};
+window.chooseTopic = (t) => {
+  document.getElementById('topicInput').value = t;
+  document.getElementById('presetModal').classList.remove('open');
+};
+window.closePreset = () => document.getElementById('presetModal').classList.remove('open');
+
+window.saveSettings = async () => {
+  geminiKey   = document.getElementById('geminiKey').value.trim();
+  globalTopic = document.getElementById('topicInput').value.trim();
+  totalRounds = parseInt(document.querySelector('input[name=rounds]:checked').value);
+
+  if (!geminiKey)   { showToast('Gemini API 키를 입력해주세요!'); return; }
+  if (!globalTopic) { showToast('토론 주제를 입력해주세요!'); return; }
+
+  // Firebase에 설정 저장
+  await set(ref(db,'settings'), {
+    topic: globalTopic,
+    rounds: totalRounds,
+    geminiKey,
+    createdAt: Date.now()
+  });
+
+  // 4개 조 방 초기화
+  for (let g = 0; g < 4; g++) {
+    const roomRef = ref(db, `rooms/group${g}`);
+    const snap = await get(roomRef);
+    if (!snap.exists()) {
+      await set(roomRef, { groupIdx: g, players:{}, messages:{}, status:'waiting', round:1, turnIdx:0 });
+    }
+  }
+
+  showToast('✅ 설정 저장 완료! 학생들에게 이 페이지 링크를 공유하세요.');
+  setTimeout(() => showScreen('screen-group'), 1200);
+};
+
+window.resetAll = async () => {
+  if (!confirm('모든 방을 초기화할까요?')) return;
+  await remove(ref(db, 'rooms'));
+  await remove(ref(db, 'settings'));
+  showToast('초기화 완료!');
+};
+
+// ═══════════════════════════════════════
+// GROUP SELECT 화면
+// ═══════════════════════════════════════
+async function renderGroupSelect() {
+  const snap = await get(ref(db,'settings'));
+  if (!snap.exists()) {
+    showToast('선생님이 아직 설정을 저장하지 않았어요!');
+    return;
+  }
+  const cfg = snap.val();
+  globalTopic = cfg.topic;
+  totalRounds = cfg.rounds;
+  geminiKey   = cfg.geminiKey;
+
+  document.getElementById('gs-topic').textContent = `📌 ${globalTopic}`;
+
+  const cards = document.getElementById('groupCards');
+  cards.innerHTML = '';
+  for (let g = 0; g < 4; g++) {
+    const roomSnap = await get(ref(db, `rooms/group${g}`));
+    const room = roomSnap.val() || {};
+    const players = room.players ? Object.values(room.players) : [];
+    const count = players.length;
+    const done  = room.status === 'done';
+    const inProgress = room.status === 'debating';
+
+    const card = document.createElement('div');
+    card.className = 'group-card' + (done ? ' done' : '') + (inProgress ? ' active' : '');
+    card.style.borderColor = GROUP_COLORS[g] + '88';
+    card.innerHTML = `
+      <div class="gc-num">GROUP ${g+1}</div>
+      <div class="gc-gname" style="color:${GROUP_COLORS[g]}">${g+1}조</div>
+      <div class="gc-members">${players.map(p=>`<span class="gc-tag">${p.name}</span>`).join('') || '<span class="gc-tag" style="color:var(--muted)">대기 중</span>'}</div>
+      <div class="gc-count" style="color:${GROUP_COLORS[g]}">${count}/4명
+        ${done ? ' · ✅완료' : inProgress ? ' · 🔴진행중' : ''}
+      </div>`;
+    if (!done) card.onclick = () => joinGroup(g);
+    cards.appendChild(card);
+  }
+}
+
+window.goGroup = async () => {
+  await renderGroupSelect();
+  showScreen('screen-group');
+};
+
+// ═══════════════════════════════════════
+// JOIN 화면 (이름 입력)
+// ═══════════════════════════════════════
+async function joinGroup(gIdx) {
+  // 인원 체크
+  const snap = await get(ref(db, `rooms/group${gIdx}/players`));
+  const existing = snap.val() ? Object.values(snap.val()) : [];
+  if (existing.length >= MAX_PLAYERS) {
+    showToast('이미 4명이 다 들어왔어요!'); return;
+  }
+
+  myGroupIdx = gIdx;
+  document.getElementById('join-gname').textContent = `${gIdx+1}조`;
+  document.getElementById('join-gname').style.color = GROUP_COLORS[gIdx];
+  document.getElementById('join-topic').textContent = `주제: ${globalTopic}`;
+  showScreen('screen-join');
+}
+
+window.enterRoom = async () => {
+  myName = document.getElementById('nameInput').value.trim();
+  if (!myName) { showToast('이름을 입력해주세요!'); return; }
+
+  // 중복 확인
+  const snap = await get(ref(db, `rooms/group${myGroupIdx}/players`));
+  const existing = snap.val() ? Object.values(snap.val()) : [];
+  if (existing.find(p => p.name === myName)) { showToast('같은 이름이 이미 있어요!'); return; }
+  if (existing.length >= MAX_PLAYERS) { showToast('이미 4명이 다 들어왔어요!'); return; }
+
+  // 내 색상 배정
+  myColor = PLAYER_COLORS[existing.length];
+  myUid   = Date.now() + '_' + Math.random().toString(36).slice(2,7);
+
+  // 방장 여부 (첫 번째 입장)
+  isHost = existing.length === 0;
+
+  // Firebase에 플레이어 등록
+  await set(ref(db, `rooms/group${myGroupIdx}/players/${myUid}`), {
+    name: myName, color: myColor, uid: myUid, joinedAt: Date.now()
+  });
+
+  enterDebateScreen();
+};
+
+// ═══════════════════════════════════════
+// DEBATE 화면
+// ═══════════════════════════════════════
+function enterDebateScreen() {
+  // 헤더
+  const pill = document.getElementById('d-grouppill');
+  pill.textContent = `${myGroupIdx+1}조`;
+  pill.style.background = GROUP_COLORS[myGroupIdx]+'22';
+  pill.style.color = GROUP_COLORS[myGroupIdx];
+  pill.style.border = `1px solid ${GROUP_COLORS[myGroupIdx]}55`;
+  document.getElementById('d-topic').textContent = `📌 ${globalTopic}`;
+  document.getElementById('chatArea').innerHTML = '';
+
+  showScreen('screen-debate');
+
+  // 입력 비활성 (사람 다 모일 때까지)
+  setInputEnabled(false, '다른 친구들이 들어오길 기다리는 중...');
+
+  // 방 상태 구독
+  listenRoom();
+}
+
+function listenRoom() {
+  if (unsubRoom) unsubRoom();
+  unsubRoom = onValue(ref(db, `rooms/group${myGroupIdx}`), snap => {
+    const room = snap.val();
+    if (!room) return;
+
+    const players = room.players ? Object.values(room.players).sort((a,b)=>a.joinedAt-b.joinedAt) : [];
+    renderPlayersBar(players);
+
+    const count = players.length;
+    document.getElementById('d-waitinfo').textContent =
+      count < MAX_PLAYERS ? `${count}/4명 입장 (${MAX_PLAYERS-count}명 대기 중)` : '';
+
+    // 4명 모이면 방장이 토론 시작
+    if (count === MAX_PLAYERS && room.status === 'waiting' && isHost) {
+      startDebateFirebase(players, room);
+    }
+
+    // 진행 중 UI
+    if (room.status === 'debating') {
+      updateDebateUI(room, players);
+    }
+
+    if (room.status === 'done') {
+      showResultScreen(room);
+    }
+  });
+
+  // 메시지 구독
+  listenMessages();
+}
+
+function listenMessages() {
+  if (unsubMessages) unsubMessages();
+  let first = true;
+  unsubMessages = onChildAdded(ref(db, `rooms/group${myGroupIdx}/messages`), snap => {
+    if (first) { first = false; }  // 첫 로드는 스킵하지 않음
+    const msg = snap.val();
+    appendMessage(msg);
+  });
+}
+
+function renderPlayersBar(players) {
+  const bar = document.getElementById('playersBar');
+  bar.innerHTML = '';
+  players.forEach((p, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'player-chip';
+    chip.id = `chip-${p.uid}`;
+    chip.style.color = p.color;
+    chip.innerHTML = `<div class="chip-dot" style="background:${p.color}"></div>${p.name}`;
+    bar.appendChild(chip);
+  });
+  const hchip = document.createElement('div');
+  hchip.className = 'player-chip';
+  hchip.id = 'chip-host';
+  hchip.style.color = HOST_COLOR;
+  hchip.innerHTML = `<div class="chip-dot" style="background:${HOST_COLOR}"></div>AI 사회자`;
+  bar.appendChild(hchip);
+}
+
+function activateChip(uid) {
+  document.querySelectorAll('.player-chip').forEach(c => c.classList.remove('active'));
+  const chip = document.getElementById(uid === 'host' ? 'chip-host' : `chip-${uid}`);
+  if (chip) chip.classList.add('active');
+}
+
+// ═══════════════════════════════════════
+// 토론 시작 (방장만 실행)
+// ═══════════════════════════════════════
+async function startDebateFirebase(players, room) {
+  await update(ref(db, `rooms/group${myGroupIdx}`), { status:'debating', round:1, turnIdx:0 });
+
+  const first = players[0];
+  const intro =
+    `안녕하세요! 저는 오늘 ${myGroupIdx+1}조 토론의 AI 사회자입니다 🎤\n` +
+    `주제는 "${globalTopic}"입니다.\n\n` +
+    `총 ${totalRounds}라운드, 각자 순서대로 발언해 주세요.\n` +
+    `먼저 **${first.name}** 학생부터! 이 주제에 대해 어떻게 생각하나요?`;
+
+  await pushMessage({ role:'host', name:'AI 사회자 🎤', color:HOST_COLOR, content:intro });
+  await update(ref(db, `rooms/group${myGroupIdx}`), { currentUid: first.uid });
+}
+
+// ═══════════════════════════════════════
+// 방 상태 → UI 업데이트
+// ═══════════════════════════════════════
+function updateDebateUI(room, players) {
+  const round   = room.round   || 1;
+  const turnIdx = room.turnIdx || 0;
+  const curUid  = room.currentUid;
+
+  // 진행바
+  const total = totalRounds * MAX_PLAYERS;
+  const done  = (round-1)*MAX_PLAYERS + (turnIdx % MAX_PLAYERS);
+  const pct   = Math.min(100, Math.round(done/total*100));
+  document.getElementById('progressBar').style.width = pct+'%';
+  document.getElementById('progressLabel').textContent = `진행도 ${pct}% · ${round}/${totalRounds} 라운드`;
+
+  // 차례 배지
+  const curPlayer = players.find(p=>p.uid===curUid);
+  if (curPlayer) {
+    const badge = document.getElementById('turnBadge');
+    badge.textContent = `${round}라운드 · ${curPlayer.name} 차례`;
+    badge.style.color = curPlayer.color;
+    badge.style.borderColor = curPlayer.color+'55';
+    activateChip(curPlayer.uid);
+  }
+
+  // 내 차례면 입력 활성
+  if (curUid === myUid && !isAiSpeaking) {
+    setInputEnabled(true, null);
+  } else {
+    const reason = isAiSpeaking ? 'AI 사회자가 응답 중...' : `${curPlayer?.name || ''}의 발언 차례`;
+    setInputEnabled(false, reason);
+    if (isAiSpeaking) activateChip('host');
+  }
+}
+
+// ═══════════════════════════════════════
+// 메시지 전송 (학생)
+// ═══════════════════════════════════════
+window.sendMessage = async () => {
+  const input = document.getElementById('msgInput');
+  const text  = input.value.trim();
+  if (!text || isAiSpeaking) return;
+
+  input.value = '';
+  setInputEnabled(false, 'AI 사회자가 응답 중...');
+
+  await pushMessage({ role:'user', name:myName, color:myColor, uid:myUid, content:text });
+
+  // 방장만 AI 호출 & 턴 전진
+  if (isHost) {
+    await advanceTurn(text);
+  }
+};
+
+window.handleKey = (e) => {
+  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); window.sendMessage(); }
+};
+
+// ═══════════════════════════════════════
+// 턴 전진 & AI 사회자 (방장만)
+// ═══════════════════════════════════════
+async function advanceTurn(lastMsg) {
+  isAiSpeaking = true;
+
+  const snap   = await get(ref(db, `rooms/group${myGroupIdx}`));
+  const room   = snap.val();
+  const players = Object.values(room.players).sort((a,b)=>a.joinedAt-b.joinedAt);
+  const pSnap  = await get(ref(db, `rooms/group${myGroupIdx}/messages`));
+  const allMsgs = pSnap.val() ? Object.values(pSnap.val()).sort((a,b)=>a.ts-b.ts) : [];
+
+  let round    = room.round    || 1;
+  let turnIdx  = room.turnIdx  || 0;
+  turnIdx++;
+
+  const isRoundEnd  = turnIdx % MAX_PLAYERS === 0;
+  const isDebateEnd = turnIdx >= totalRounds * MAX_PLAYERS;
+
+  let aiPrompt = '';
+  let nextUid  = '';
+
+  if (isDebateEnd) {
+    aiPrompt = `모든 라운드가 끝났습니다. 각 학생의 발언을 바탕으로 토론을 간략히 마무리해 주세요. 평가는 곧 별도 진행됩니다.`;
+  } else if (isRoundEnd) {
+    round++;
+    const nextPlayer = players[0];
+    nextUid = nextPlayer.uid;
+    aiPrompt = `${round-1}라운드가 끝났습니다. 이번 라운드를 한두 문장으로 정리하고, ${round}라운드를 시작하며 ${nextPlayer.name} 학생에게 새로운 질문을 던져주세요.`;
+  } else {
+    const nextPlayer = players[turnIdx % MAX_PLAYERS];
+    nextUid = nextPlayer.uid;
+    const prevPlayer = players[(turnIdx-1) % MAX_PLAYERS];
+    aiPrompt = `${prevPlayer.name} 학생이 방금 발언했습니다. 짧게 반응해주고, ${nextPlayer.name} 학생에게 이 주제에 대한 의견을 물어봐 주세요.`;
+  }
+
+  // AI 호출
+  try {
+    const aiText = await callGemini(allMsgs, aiPrompt, players);
+    await pushMessage({ role:'host', name:'AI 사회자 🎤', color:HOST_COLOR, content:aiText });
+  } catch(e) {
+    await pushMessage({ role:'host', name:'AI 사회자 🎤', color:HOST_COLOR, content:'(AI 오류: '+e.message+')' });
+  }
+
+  if (isDebateEnd) {
+    await update(ref(db, `rooms/group${myGroupIdx}`), { status:'done', round, turnIdx });
+    await doEvaluation(allMsgs, players);
+  } else {
+    await update(ref(db, `rooms/group${myGroupIdx}`), { round, turnIdx, currentUid: nextUid });
+  }
+
+  isAiSpeaking = false;
+}
+
+// ═══════════════════════════════════════
+// Gemini API
+// ═══════════════════════════════════════
+async function callGemini(allMsgs, extraPrompt, players) {
+  const system = `당신은 초등학교 토론 수업의 AI 사회자입니다.
+참여 학생: ${players.map(p=>p.name).join(', ')}
+토론 주제: "${globalTopic}"
+총 라운드: ${totalRounds}
+
+규칙:
+- 초등학생(6학년)이 이해할 수 있는 친근하고 쉬운 말로 대화하세요.
+- 학생 발언에 짧게 공감하고 깊이 생각할 수 있는 질문을 던지세요.
+- 한 메시지는 150자 내외로 핵심만 전달하세요.
+- 학생 이름을 직접 불러주세요.
+- 라운드 끝날 때는 간단히 정리하고 다음 발언자를 언급해주세요.`;
+
+  const userMsgs = allMsgs.filter(m=>m.role==='user');
+  const msgs = userMsgs.map(m => ({
+    role:'user', parts:[{text:`[${m.name}]: ${m.content}`}]
+  }));
+  msgs.push({ role:'user', parts:[{text:extraPrompt}] });
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+    { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        system_instruction:{ parts:[{text:system}] },
+        contents: msgs,
+        generationConfig:{ temperature:0.8, maxOutputTokens:400 }
+      })
+    }
+  );
+  if (!res.ok) { const e=await res.json(); throw new Error(e.error?.message||'API오류'); }
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '(응답 없음)';
+}
+
+// ═══════════════════════════════════════
+// 평가 (방장만)
+// ═══════════════════════════════════════
+async function doEvaluation(allMsgs, players) {
+  const transcript = allMsgs.filter(m=>m.role==='user')
+    .map(m=>`${m.name}: ${m.content}`).join('\n');
+
+  const evalSystem = `당신은 초등학교 토론 수업 평가 전문가입니다.
+반드시 아래 JSON 형식만 반환하세요 (마크다운·백틱 없이):
+{"overall":"전체 총평 3-4문장","scores":[{"name":"이름","score":85,"comment":"한 문장 피드백"}],"best_argument":"가장 인상적인 발언 (이름 포함)","improvement":"공통 조언 1문장"}
+점수는 50-100 사이.`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          system_instruction:{ parts:[{text:evalSystem}] },
+          contents:[{ role:'user', parts:[{text:`주제: ${globalTopic}\n\n발언 기록:\n${transcript}\n\n평가해주세요.`}] }],
+          generationConfig:{ temperature:0.5, maxOutputTokens:600 }
+        })
+      }
+    );
+    const data = await res.json();
+    const raw  = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const clean = raw.replace(/```json|```/g,'').trim();
+    const eval_ = JSON.parse(clean);
+    await set(ref(db, `rooms/group${myGroupIdx}/evaluation`), eval_);
+  } catch(e) {
+    await set(ref(db, `rooms/group${myGroupIdx}/evaluation`), { error: e.message });
+  }
+}
+
+// ═══════════════════════════════════════
+// 결과 화면
+// ═══════════════════════════════════════
+async function showResultScreen(room) {
+  if (unsubRoom) { unsubRoom(); unsubRoom=null; }
+  if (unsubMessages) { unsubMessages(); unsubMessages=null; }
+
+  const players = Object.values(room.players||{}).sort((a,b)=>a.joinedAt-b.joinedAt);
+  const gColor  = GROUP_COLORS[myGroupIdx];
+
+  const badge = document.getElementById('r-groupbadge');
+  badge.textContent = `${myGroupIdx+1}조`;
+  badge.style.background = gColor+'22';
+  badge.style.color = gColor;
+  badge.style.border = `1px solid ${gColor}55`;
+  document.getElementById('r-topic').textContent = `📌 ${globalTopic}`;
+
+  const scoresDiv = document.getElementById('r-scores');
+  scoresDiv.innerHTML = players.map((p,i)=>`
+    <div class="score-card">
+      <div class="score-name" style="color:${p.color}">${p.name}</div>
+      <div class="score-bar-wrap"><div class="score-bar" id="rbar-${i}" style="background:${p.color};width:0%"></div></div>
+      <div class="score-num" id="rnum-${i}">평가 중...</div>
+    </div>`).join('');
+
+  showScreen('screen-result');
+
+  // 평가 결과 폴링
+  let tries = 0;
+  const wait = setInterval(async () => {
+    tries++;
+    const evalSnap = await get(ref(db,`rooms/group${myGroupIdx}/evaluation`));
+    if (evalSnap.exists()) {
+      clearInterval(wait);
+      const ev = evalSnap.val();
+      if (ev.error) {
+        document.getElementById('r-eval').textContent = '평가 오류: '+ev.error;
+        return;
+      }
+      document.getElementById('r-eval').textContent =
+        `📝 총평\n${ev.overall}\n\n🌟 가장 인상적인 발언\n${ev.best_argument}\n\n💡 다음을 위한 조언\n${ev.improvement}`;
+      if (ev.scores) {
+        ev.scores.forEach((s,i)=>{
+          const bar=document.getElementById(`rbar-${i}`);
+          const num=document.getElementById(`rnum-${i}`);
+          if(bar) setTimeout(()=>bar.style.width=s.score+'%',300);
+          if(num) num.textContent=`${s.score}점 · ${s.comment}`;
+        });
+      }
+    }
+    if (tries > 30) clearInterval(wait);
+  }, 2000);
+}
+
+window.goGroupFromResult = async () => {
+  await renderGroupSelect();
+  showScreen('screen-group');
+};
+
+// ═══════════════════════════════════════
+// 메시지 Firebase push & UI append
+// ═══════════════════════════════════════
+async function pushMessage(msg) {
+  await push(ref(db, `rooms/group${myGroupIdx}/messages`), { ...msg, ts: Date.now() });
+}
+
+function appendMessage(msg) {
+  const area = document.getElementById('chatArea');
+  // 중복 방지: 같은 ts가 이미 있으면 스킵
+  if (document.querySelector(`[data-ts="${msg.ts}"]`)) return;
+
+  const div = document.createElement('div');
+  div.className = 'message' + (msg.uid === myUid ? ' mine' : '');
+  div.setAttribute('data-ts', msg.ts);
+
+  const isHost = msg.role === 'host';
+  const isMine = msg.uid === myUid;
+
+  div.innerHTML = `
+    <div class="msg-avatar" style="background:${msg.color}22;color:${msg.color}">${[...msg.name][0]}</div>
+    <div class="msg-body">
+      <div class="msg-name" style="color:${msg.color}">${msg.name}</div>
+      <div class="msg-bubble ${isHost?'host-bubble':''}">${escHtml(msg.content)}</div>
+    </div>`;
+  area.appendChild(div);
+  area.scrollTop = area.scrollHeight;
+}
+
+// ═══════════════════════════════════════
+// 헬퍼
+// ═══════════════════════════════════════
+function setInputEnabled(on, reason) {
+  const btn = document.getElementById('sendBtn');
+  const inp = document.getElementById('msgInput');
+  const info= document.getElementById('inputInfo');
+  btn.disabled = !on;
+  inp.disabled = !on;
+  if (reason) info.textContent = reason;
+  else info.innerHTML = `<span style="color:${myColor};font-weight:700">${myName}</span> 님의 발언 차례입니다 ✏️`;
+  if (on) inp.focus();
+}
+
+function escHtml(t) {
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display='block';
+  setTimeout(()=>t.style.display='none', 3000);
+}
+
+// 초기 화면
+showScreen('screen-home');
+</script>
+
+<style>
+:root {
+  --bg:#0f1117; --surface:#1a1d27; --card:#21253a;
+  --border:#2e3250; --accent:#5b8ff9; --host:#c084fc;
+  --text:#e8eaf6; --muted:#6b7280;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans KR',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+
+/* ── 공통 ── */
+.screen{display:none;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;padding:20px;}
+.logo{font-family:'Gmarket Sans',sans-serif;font-size:2.4rem;font-weight:700;margin-bottom:4px;
+  background:linear-gradient(135deg,var(--accent),var(--host));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.logo-sub{font-size:.88rem;color:var(--muted);margin-bottom:32px;text-align:center;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:28px;width:100%;max-width:520px;display:flex;flex-direction:column;gap:18px;}
+.section-label{font-size:.72rem;font-weight:700;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:6px;}
+input[type=text],input[type=password],textarea{background:var(--card);border:1px solid var(--border);border-radius:9px;color:var(--text);font-family:inherit;font-size:.88rem;padding:9px 13px;width:100%;outline:none;transition:border-color .2s;}
+input:focus,textarea:focus{border-color:var(--accent);}
+.btn{border:none;border-radius:11px;cursor:pointer;font-family:'Gmarket Sans',sans-serif;font-size:.95rem;font-weight:700;padding:13px;width:100%;transition:opacity .2s,transform .15s;}
+.btn:hover{opacity:.88;transform:translateY(-1px);}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--host));color:#fff;}
+.btn-ghost{background:var(--card);border:1px solid var(--border);color:var(--text);font-family:inherit;}
+.btn-ghost:hover{border-color:var(--accent);}
+.btn-sm{padding:7px 14px;width:auto;font-size:.82rem;border-radius:8px;}
+.topic-row{display:flex;gap:8px;}
+.topic-row input{flex:1;}
+.rounds-row{display:flex;gap:14px;flex-wrap:wrap;}
+.rounds-row label{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:.85rem;}
+
+/* ── HOME ── */
+#screen-home{background:radial-gradient(ellipse at 30% 20%,#1e2a6e33 0%,transparent 55%),radial-gradient(ellipse at 70% 80%,#6e1e3a33 0%,transparent 55%),var(--bg);}
+.home-btns{display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px;}
+.role-btn{display:flex;flex-direction:column;align-items:center;gap:4px;background:var(--surface);border:2px solid var(--border);border-radius:16px;cursor:pointer;padding:20px;transition:border-color .2s,transform .15s;}
+.role-btn:hover{border-color:var(--accent);transform:translateY(-2px);}
+.role-btn .icon{font-size:2rem;}
+.role-btn .label{font-weight:700;font-size:.95rem;}
+.role-btn .desc{font-size:.75rem;color:var(--muted);}
+
+/* ── GROUP SELECT ── */
+#screen-group{background:radial-gradient(ellipse at 70% 10%,#1e3a2a33 0%,transparent 55%),var(--bg);}
+.gs-topic{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 16px;font-size:.84rem;font-weight:600;margin-bottom:20px;text-align:center;max-width:480px;}
+.group-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;max-width:480px;margin-bottom:18px;}
+.group-card{background:var(--surface);border:2px solid var(--border);border-radius:14px;padding:16px;cursor:pointer;transition:border-color .2s,transform .15s,box-shadow .2s;}
+.group-card:hover{transform:translateY(-2px);}
+.group-card.done{opacity:.5;cursor:default;}
+.group-card.done::after{content:'✅ 완료';font-size:.7rem;font-weight:700;color:#22c55e;display:block;margin-top:6px;}
+.group-card.active{box-shadow:0 0 16px -4px var(--accent);}
+.gc-num{font-size:.68rem;font-weight:700;letter-spacing:2px;color:var(--muted);margin-bottom:4px;}
+.gc-gname{font-family:'Gmarket Sans',sans-serif;font-size:1.1rem;font-weight:700;margin-bottom:8px;}
+.gc-members{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;}
+.gc-tag{font-size:.73rem;background:var(--card);border-radius:5px;padding:2px 7px;}
+.gc-count{font-size:.75rem;font-weight:700;}
+
+/* ── JOIN ── */
+#screen-join{background:var(--bg);}
+.join-badge{font-size:.8rem;font-weight:700;padding:4px 14px;border-radius:20px;margin-bottom:8px;display:inline-block;}
+
+/* ── DEBATE ── */
+#screen-debate{display:none;flex-direction:column;height:100vh;min-height:unset;padding:0;justify-content:flex-start;}
+.debate-header{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:8px;}
+.dh-left{display:flex;align-items:center;gap:8px;min-width:0;}
+.group-pill{font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap;flex-shrink:0;}
+.header-topic{font-size:.82rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.turn-badge{font-size:.73rem;font-weight:700;padding:4px 10px;border-radius:20px;background:var(--card);border:1px solid var(--border);transition:all .3s;white-space:nowrap;flex-shrink:0;}
+.d-wait{font-size:.72rem;color:var(--muted);padding:3px 10px;background:var(--card);border-radius:20px;white-space:nowrap;}
+.players-bar{display:flex;gap:6px;padding:8px 13px;background:var(--surface);border-bottom:1px solid var(--border);overflow-x:auto;flex-shrink:0;}
+.player-chip{display:flex;align-items:center;gap:5px;background:var(--card);border:1.5px solid var(--border);border-radius:20px;padding:4px 10px;font-size:.76rem;font-weight:600;white-space:nowrap;transition:all .3s;}
+.player-chip.active{border-color:currentColor;box-shadow:0 0 10px -3px currentColor;}
+.chip-dot{width:7px;height:7px;border-radius:50%;}
+.progress-strip{padding:4px 13px 2px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.progress-bar-wrap{background:var(--border);border-radius:3px;height:3px;overflow:hidden;}
+.progress-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--host));transition:width .4s;border-radius:3px;}
+.progress-label{font-size:.68rem;color:var(--muted);text-align:right;margin-top:2px;}
+.chat-area{flex:1;overflow-y:auto;padding:13px;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth;}
+.message{display:flex;gap:8px;align-items:flex-start;animation:msgIn .3s ease;}
+@keyframes msgIn{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:translateY(0);}}
+.msg-avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;flex-shrink:0;margin-top:2px;}
+.msg-name{font-size:.68rem;font-weight:700;margin-bottom:3px;}
+.msg-bubble{background:var(--card);border:1px solid var(--border);border-radius:0 10px 10px 10px;padding:8px 12px;font-size:.85rem;line-height:1.6;max-width:480px;white-space:pre-wrap;word-break:break-word;}
+.msg-bubble.host-bubble{background:#1e1530;border-color:#6b3fa055;}
+.input-area{background:var(--surface);border-top:1px solid var(--border);padding:11px 13px;flex-shrink:0;}
+.input-info{font-size:.74rem;color:var(--muted);margin-bottom:6px;}
+.input-row{display:flex;gap:7px;}
+.input-row textarea{flex:1;resize:none;height:40px;padding:9px 12px;border-radius:10px;font-size:.86rem;line-height:1.4;}
+.send-btn{background:linear-gradient(135deg,var(--accent),var(--host));border:none;border-radius:10px;color:#fff;cursor:pointer;font-size:1.1rem;width:40px;flex-shrink:0;transition:opacity .2s,transform .15s;}
+.send-btn:hover{opacity:.85;transform:scale(1.05);}
+.send-btn:disabled{opacity:.3;cursor:not-allowed;transform:none;}
+
+/* ── RESULT ── */
+#screen-result{background:radial-gradient(ellipse at 50% 0%,#1e2a6e44 0%,transparent 60%),var(--bg);justify-content:flex-start;padding-top:36px;}
+.result-inner{max-width:640px;width:100%;}
+.r-group-badge{display:inline-block;font-size:.78rem;font-weight:700;padding:4px 12px;border-radius:20px;margin-bottom:6px;}
+.r-title{font-family:'Gmarket Sans',sans-serif;font-size:1.6rem;font-weight:700;margin-bottom:4px;background:linear-gradient(135deg,#5bf9b8,var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.r-topic{font-size:.86rem;color:var(--muted);margin-bottom:20px;}
+.result-scores{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:18px;}
+.score-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
+.score-name{font-size:.76rem;font-weight:700;margin-bottom:5px;}
+.score-bar-wrap{background:var(--border);border-radius:4px;height:5px;overflow:hidden;margin-bottom:4px;}
+.score-bar{height:100%;border-radius:4px;transition:width 1s ease;}
+.score-num{font-size:.72rem;color:var(--muted);}
+.r-eval{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:20px;font-size:.86rem;line-height:1.8;white-space:pre-wrap;margin-bottom:18px;}
+
+/* ── 모달 ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:#00000088;z-index:200;align-items:center;justify-content:center;padding:20px;}
+.modal-overlay.open{display:flex;}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:15px;padding:20px;width:100%;max-width:380px;max-height:78vh;overflow-y:auto;}
+.modal-title{font-weight:700;font-size:.92rem;margin-bottom:12px;}
+.preset-item{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:.83rem;cursor:pointer;margin-bottom:6px;transition:border-color .2s,background .2s;}
+.preset-item:hover{border-color:var(--accent);background:#1e2640;}
+
+/* ── 토스트 ── */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#ef4444;color:#fff;padding:8px 18px;border-radius:9px;font-size:.82rem;font-weight:600;z-index:999;display:none;}
+
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px;}
+</style>
+</head>
+<body>
+
+<!-- ══════ HOME ══════ -->
+<div class="screen" id="screen-home">
+  <div class="logo">🎤 토론 교실</div>
+  <div class="logo-sub">AI 사회자와 함께하는 실시간 토론</div>
+  <div class="home-btns">
+    <div class="role-btn" onclick="goTeacher()">
+      <div class="icon">👩‍🏫</div>
+      <div class="label">선생님</div>
+      <div class="desc">주제·설정 입력</div>
+    </div>
+    <div class="role-btn" onclick="goGroup()">
+      <div class="icon">🧑‍🤝‍🧑</div>
+      <div class="label">학생</div>
+      <div class="desc">조 선택 후 입장</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ TEACHER SETUP ══════ -->
+<div class="screen" id="screen-teacher">
+  <div class="logo" style="font-size:1.8rem;">👩‍🏫 선생님 설정</div>
+  <div class="logo-sub">설정을 저장하면 학생들이 입장할 수 있어요</div>
+  <div class="card">
+    <div>
+      <div class="section-label">Gemini API 키</div>
+      <input type="password" id="geminiKey" placeholder="AIza..." />
+      <div style="font-size:.7rem;color:var(--muted);margin-top:4px;">🔑 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:none;">Google AI Studio</a>에서 무료 발급</div>
+    </div>
+    <div>
+      <div class="section-label">공통 토론 주제</div>
+      <div class="topic-row">
+        <button class="btn-ghost btn btn-sm" onclick="openPreset()">📋 추천 주제</button>
+        <input type="text" id="topicInput" placeholder="주제를 입력하거나 추천에서 선택" />
+      </div>
+    </div>
+    <div>
+      <div class="section-label">라운드 수</div>
+      <div class="rounds-row">
+        <label><input type="radio" name="rounds" value="2" style="accent-color:var(--accent);" checked> 2라운드</label>
+        <label><input type="radio" name="rounds" value="3" style="accent-color:var(--accent);"> 3라운드</label>
+        <label><input type="radio" name="rounds" value="4" style="accent-color:var(--accent);"> 4라운드</label>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveSettings()">✅ 설정 저장</button>
+    <button class="btn btn-ghost" onclick="resetAll()" style="font-size:.8rem;padding:9px;">🔄 전체 초기화 (다음 수업 준비)</button>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-home')" style="width:auto;align-self:center;">← 홈으로</button>
+  </div>
+</div>
+
+<!-- ══════ GROUP SELECT ══════ -->
+<div class="screen" id="screen-group">
+  <div class="logo" style="font-size:1.8rem;">🏫 조 선택</div>
+  <div class="logo-sub">토론할 조를 선택하세요</div>
+  <div class="gs-topic" id="gs-topic"></div>
+  <div class="group-cards" id="groupCards"></div>
+  <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-home')">← 홈으로</button>
+</div>
+
+<!-- ══════ JOIN ══════ -->
+<div class="screen" id="screen-join">
+  <div class="logo" style="font-size:1.8rem;">✏️ 입장</div>
+  <div class="card" style="max-width:360px;align-items:center;">
+    <div style="text-align:center;">
+      <div class="join-badge" id="join-badge" style="background:#5b8ff922;color:var(--accent);border:1px solid #5b8ff955;">
+        <span id="join-gname"></span> 입장
+      </div>
+      <div style="font-size:.82rem;color:var(--muted);margin-top:4px;" id="join-topic"></div>
+    </div>
+    <div style="width:100%">
+      <div class="section-label">내 이름</div>
+      <input type="text" id="nameInput" placeholder="이름을 입력하세요" maxlength="8"
+        onkeydown="if(event.key==='Enter') enterRoom()" />
+    </div>
+    <button class="btn btn-primary" onclick="enterRoom()">🚀 입장하기</button>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-group')" style="width:auto;">← 조 선택으로</button>
+  </div>
+</div>
+
+<!-- ══════ DEBATE ══════ -->
+<div class="screen" id="screen-debate">
+  <div class="debate-header">
+    <div class="dh-left">
+      <div class="group-pill" id="d-grouppill"></div>
+      <div class="header-topic" id="d-topic"></div>
+    </div>
+    <div class="turn-badge" id="turnBadge">대기 중...</div>
+    <div class="d-wait" id="d-waitinfo"></div>
+  </div>
+  <div class="players-bar" id="playersBar"></div>
+  <div class="progress-strip">
+    <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
+    <div class="progress-label" id="progressLabel">토론 시작 전</div>
+  </div>
+  <div class="chat-area" id="chatArea"></div>
+  <div class="input-area">
+    <div class="input-info" id="inputInfo">입장 대기 중...</div>
+    <div class="input-row">
+      <textarea id="msgInput" placeholder="의견을 입력하세요..." onkeydown="handleKey(event)" rows="1"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>➤</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ RESULT ══════ -->
+<div class="screen" id="screen-result">
+  <div class="result-inner">
+    <div class="r-group-badge" id="r-groupbadge"></div>
+    <div class="r-title">🏆 토론 결과</div>
+    <div class="r-topic" id="r-topic"></div>
+    <div class="result-scores" id="r-scores"></div>
+    <div class="r-eval" id="r-eval">AI 사회자가 평가하는 중... ⏳</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" style="flex:1" onclick="goGroupFromResult()">← 조 선택으로</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="showScreen('screen-home')">처음으로</button>
+    </div>
+  </div>
+</div>
+
+<!-- 주제 모달 -->
+<div class="modal-overlay" id="presetModal">
+  <div class="modal-box">
+    <div class="modal-title">📋 추천 토론 주제</div>
+    <div id="presetList"></div>
+    <button class="btn btn-ghost" onclick="closePreset()" style="margin-top:8px;">닫기</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+</body>
+</html>
