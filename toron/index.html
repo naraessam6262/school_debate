@@ -98,9 +98,12 @@ function showScreen(id) {
 // ═══════════════════════════════════════
 // HOME
 // ═══════════════════════════════════════
-window.goTeacher = () => showScreen('screen-teacher');
+window.goTeacher = async () => {
+  await renderGroupSelect(true);
+  showScreen('screen-group');
+};
 window.goStudent = async () => {
-  await renderGroupSelect();
+  await renderGroupSelect(false);
   showScreen('screen-group');
 };
 
@@ -134,7 +137,7 @@ window.saveSettings = async () => {
 
   showToast('✅ 설정 저장 완료! 학생들에게 링크를 공유하세요.');
   setTimeout(() => {
-    renderGroupSelect();
+    renderGroupSelect(true);
     showScreen('screen-group');
   }, 1200);
 };
@@ -149,7 +152,7 @@ window.resetAll = async () => {
 // ═══════════════════════════════════════
 // GROUP SELECT
 // ═══════════════════════════════════════
-async function renderGroupSelect() {
+async function renderGroupSelect(isTeacher = false) {
   const snap = await get(ref(db,'settings'));
   if (!snap.exists()) {
     document.getElementById('gs-notice').style.display = 'block';
@@ -161,6 +164,10 @@ async function renderGroupSelect() {
   const cfg = snap.val();
   totalRounds = cfg.rounds;
   geminiKey   = cfg.geminiKey;
+
+  // 선생님 모드 표시
+  const teacherBar = document.getElementById('teacher-bar');
+  if (teacherBar) teacherBar.style.display = isTeacher ? 'flex' : 'none';
 
   const cards = document.getElementById('groupCards');
   cards.innerHTML = '';
@@ -176,16 +183,36 @@ async function renderGroupSelect() {
     const card = document.createElement('div');
     card.className = 'group-card' + (done ? ' done' : '') + (inProgress ? ' inprogress' : '');
     card.style.borderColor = GROUP_COLORS[g] + '88';
+
+    const startBtn = isTeacher && !done && !inProgress
+      ? `<button class="force-start-btn" onclick="forceStart(${g}, event)" style="border-color:${GROUP_COLORS[g]}55;color:${GROUP_COLORS[g]}">
+          ▶ ${count}명으로 시작
+         </button>`
+      : '';
+
     card.innerHTML = `
       <div class="gc-emoji">${GROUP_EMOJIS[g]}</div>
       <div class="gc-num" style="color:${GROUP_COLORS[g]}">${g+1}조</div>
       <div class="gc-topic">${GROUP_TOPICS[g]}</div>
       <div class="gc-members">${players.map(p=>`<span class="gc-tag" style="color:${p.color}">${p.name}</span>`).join('') || '<span class="gc-tag">대기 중</span>'}</div>
-      <div class="gc-count" style="color:${GROUP_COLORS[g]}">${count}/4명 ${done?'· ✅완료':inProgress?'· 🔴진행중':'· ⏳대기'}</div>`;
-    if (!done) card.onclick = () => joinGroup(g);
+      <div class="gc-count" style="color:${GROUP_COLORS[g]}">${count}명 입장 ${done?'· ✅완료':inProgress?'· 🔴진행중':'· ⏳대기'}</div>
+      ${startBtn}`;
+    if (!done && !isTeacher) card.onclick = () => joinGroup(g);
     cards.appendChild(card);
   }
 }
+
+// 선생님 강제 시작
+window.forceStart = async (gIdx, e) => {
+  e.stopPropagation();
+  const snap = await get(ref(db, `rooms/group${gIdx}/players`));
+  const players = snap.val() ? Object.values(snap.val()) : [];
+  if (players.length === 0) { showToast('입장한 학생이 없어요!'); return; }
+  if (!confirm(`${gIdx+1}조를 ${players.length}명으로 시작할까요?`)) return;
+  await update(ref(db, `rooms/group${gIdx}`), { forceStart: true });
+  showToast(`✅ ${gIdx+1}조 토론 시작!`);
+  setTimeout(() => renderGroupSelect(true), 1500);
+};
 
 // ═══════════════════════════════════════
 // JOIN
@@ -253,9 +280,10 @@ function listenRoom() {
 
     const count = players.length;
     document.getElementById('d-waitinfo').textContent =
-      count < MAX_PLAYERS ? `${count}/4명 입장 (${MAX_PLAYERS-count}명 더 필요)` : '';
+      room.status === 'waiting' ? `${count}명 입장 · 선생님이 시작 버튼을 누르면 시작돼요` : '';
 
-    if (count === MAX_PLAYERS && room.status === 'waiting' && isHost) {
+    // 선생님이 Firebase에 forceStart 신호를 보내면 방장이 토론 시작
+    if (room.status === 'waiting' && room.forceStart && isHost) {
       startDebateFirebase(players);
     }
     if (room.status === 'debating') updateDebateUI(room, players);
@@ -551,7 +579,7 @@ async function showResultScreen(room) {
 }
 
 window.goGroupFromResult = async () => {
-  await renderGroupSelect();
+  await renderGroupSelect(false);
   showScreen('screen-group');
 };
 
@@ -658,6 +686,8 @@ input:focus{border-color:var(--accent);}
 .gc-members{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;}
 .gc-tag{font-size:.7rem;background:var(--card);border-radius:5px;padding:2px 6px;color:var(--muted);}
 .gc-count{font-size:.73rem;font-weight:700;}
+.force-start-btn{margin-top:8px;width:100%;background:transparent;border:1px solid;border-radius:8px;cursor:pointer;font-family:'Gmarket Sans',sans-serif;font-size:.78rem;font-weight:700;padding:6px;transition:background .2s;}
+.force-start-btn:hover{background:#ffffff11;}
 
 /* JOIN */
 #screen-join{background:var(--bg);}
@@ -770,6 +800,11 @@ input:focus{border-color:var(--accent);}
   <div class="logo" style="font-size:1.7rem;">🏫 조 선택</div>
   <div class="logo-sub">우리 학교 토론 · 토론할 조를 선택하세요</div>
   <div class="gs-notice" id="gs-notice">⚠️ 선생님이 아직 설정을 저장하지 않았어요!</div>
+  <!-- 선생님 전용 바 -->
+  <div id="teacher-bar" style="display:none;gap:10px;margin-bottom:12px;width:100%;max-width:520px;background:#1e2a1e;border:1px solid #2e5030;border-radius:12px;padding:10px 14px;align-items:center;justify-content:space-between;">
+    <div style="font-size:.8rem;color:#5bf9b8;font-weight:700;">👩‍🏫 선생님 모드 · 조별 시작 버튼을 눌러주세요</div>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-teacher')" style="border-color:#5bf9b855;color:#5bf9b8;white-space:nowrap;">⚙️ 설정</button>
+  </div>
   <div class="group-cards" id="groupCards"></div>
   <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-home')">← 홈으로</button>
 </div>
